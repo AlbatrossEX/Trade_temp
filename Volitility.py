@@ -63,7 +63,7 @@ class IntradayCryptoVolatility(QCAlgorithm):
         price_edge = (current_price - mean_price) / mean_price
 
         # 4. EXECUTION LOGIC (Runs every 60 seconds)
-        volatility_threshold = 1.0
+        volatility_threshold = 0.8
 
         can_trade = (
             self.last_trade_time is None
