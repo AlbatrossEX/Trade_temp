@@ -7,11 +7,21 @@ class ETHMeanReversionAlgorithm(QCAlgorithm):
     """
     ETH Mean Reversion Strategy for QuantConnect (LEAN engine) - PEP8/snake_case API.
 
-    v2 changes (fee-bleed fixes vs. the hourly all-in version):
-      1. MINUTE resolution instead of hourly -> far fewer threshold crossings
+    v3 changes (fee-bleed fixes vs. the hourly/minute all-in versions):
+      1. DAILY resolution -> indicator windows now span real trend/reversion
+         cycles instead of intraday noise, so far fewer threshold crossings
       2. Re-entry cooldown -> can't immediately jump back in after an exit
       3. Fractional position sizing -> a single whipsaw costs less
       4. Per-trade fee logging via on_order_event -> watch costs accumulate
+
+    NOTE: v3 tried a protective StopMarketOrder placed on fill, to get
+    intrabar High/Low stop enforcement instead of a close-price check. Live
+    backtest confirmed Coinbase does not support Stop Market orders (deprecated
+    exchange-side since 2019-03-23) -- QuantConnect's Coinbase brokerage model
+    rejects every submission, so that stop never actually protected anything.
+    Reverted to a manual close-price stop check via self.liquidate() (a plain
+    market order, which the brokerage does accept). A StopLimitOrder is worth
+    trying as a follow-up since real Coinbase still supports stop-limit.
 
     Educational template only. Not investment advice.
     """
@@ -24,7 +34,7 @@ class ETHMeanReversionAlgorithm(QCAlgorithm):
 
         # --- Add ETH/USD ---
         # Cash account = spot, LONG-ONLY (cannot short spot crypto on a cash account).
-        crypto = self.add_crypto("ETHUSD", Resolution.MINUTE, Market.COINBASE)
+        crypto = self.add_crypto("ETHUSD", Resolution.DAILY, Market.COINBASE)
         self._symbol = crypto.symbol
         self.set_brokerage_model(BrokerageName.COINBASE, AccountType.CASH)
 
@@ -34,7 +44,7 @@ class ETHMeanReversionAlgorithm(QCAlgorithm):
         self.entry_z = 2.0
         self.exit_z = 0.5
         self.trend_threshold = 0.05  # 5% deviation = "strong trend"
-        self.stop_loss_pct = 0.08    # a bit wider on MINUTE bars
+        self.stop_loss_pct = 0.08    # checked on daily close only; see NOTE above re: Coinbase
 
         # --- Fee-control knobs ---
         self.position_size = 0.30    # allocate 30% per trade instead of 100%
@@ -48,12 +58,12 @@ class ETHMeanReversionAlgorithm(QCAlgorithm):
         self.trade_count = 0
 
         # --- Indicators (underscore-prefixed to avoid clashing with self.sma()/self.std()) ---
-        self._sma = self.sma(self._symbol, self.window, Resolution.MINUTE)
-        self._std = self.std(self._symbol, self.window, Resolution.MINUTE)
-        self._trend_sma = self.sma(self._symbol, self.trend_window, Resolution.MINUTE)
+        self._sma = self.sma(self._symbol, self.window, Resolution.DAILY)
+        self._std = self.std(self._symbol, self.window, Resolution.DAILY)
+        self._trend_sma = self.sma(self._symbol, self.trend_window, Resolution.DAILY)
 
         # --- Warm up so indicators are valid before trading ---
-        self.set_warm_up(self.trend_window, Resolution.MINUTE)
+        self.set_warm_up(self.trend_window, Resolution.DAILY)
 
     def _in_cooldown(self):
         if self.last_exit_time is None:
@@ -97,7 +107,8 @@ class ETHMeanReversionAlgorithm(QCAlgorithm):
                 self.entry_price = price
                 self.debug(f"SHORT entry at {price:.2f}, z={zscore:.2f}")
 
-        # --- Long open: exit on reversion or stop-loss ---
+        # --- Long open: exit on reversion or stop-loss (close-price check; Coinbase
+        # rejects Stop Market orders, so this can't be enforced intrabar) ---
         elif holdings > 0:
             reverted = zscore > -self.exit_z
             stopped_out = price < self.entry_price * (1 - self.stop_loss_pct)
@@ -107,7 +118,7 @@ class ETHMeanReversionAlgorithm(QCAlgorithm):
                 self.debug(f"LONG exit at {price:.2f} ({'stop' if stopped_out else 'reverted'})")
                 self.entry_price = None
 
-        # --- Short open: exit on reversion or stop-loss ---
+        # --- Short open: exit on reversion or stop-loss (close-price check) ---
         elif holdings < 0:
             reverted = zscore < self.exit_z
             stopped_out = price > self.entry_price * (1 + self.stop_loss_pct)
